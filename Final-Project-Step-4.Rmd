@@ -1,0 +1,374 @@
+---
+title: 'Final Project : Credit Card Fraud Detection'
+author: "Dan Zylkowski"
+date: "February 27th 2020"
+output:
+  html_document:
+    df_print: paged
+    toc: yes
+  word_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(comment = NA)
+```
+
+
+## Abstract
+
+Credit card fraud is the most common type of identity fraud, and businesses are desperate to find a solution to stop the loss it creates. A recent study by [Juniper Research](https://www.juniperresearch.com/press/press-releases/retailers-to-lose-130-bn-globally-in-card-fraud) has found that retailers are expected to lose $130 billion in digital CNP (Card-not-Present) fraud between 2018 and 2023. Businesses need to be able to detect fraudulent credit card transactions, and machine learning could be a solution.
+
+## Introduction
+
+
+## Preparations  
+
+The following packages will be used for this analysis:
+
+```{r loading_packages, message=FALSE, warning=FALSE}
+library(readr) # For loading the data
+library(skimr) # To skim the data
+library(corrplot) # To plot corrplot
+library(caret) # For machine learning
+library(class) # For machine learnng
+library(ggplot2) # For graphics
+library(e1071) # For statistics
+library(DMwR) # For SMOTE sampling
+library(ROSE) # For ROSE sampling
+library(doParallel) # For parallel processing
+library(dplyr) # For data manipulation
+library(caretEnsemble) # For model ensembling
+library(pROC) # For ROC
+```
+
+## Dataset
+
+The dataset contains transactions made by credit cards in September 2013 by European cardholders over the course of two days.  There are 492 fraudulent transactions out of 284,807 total transactions. The dataset is highly unbalanced, with the positive class (fraudulent transactions) accounting for 0.172% of all transactions. Due to this extreme imbalance,   ROC will be used as the model metric instead of accuracy.  The dataset can be downloaded at the following URL (https://www.kaggle.com/mlg-ulb/creditcardfraud/download). There are 31 numerical variables in total. The variables are named V1, V2,…V28, and are the result of principal component analysis (PCA) transformation. PCA is used to convert a set of observations of possibly correlated variables into a set of values of linearly uncorrelated variables called principal components. There are two additional variables, labeled Time and Amount. Time represents the number of seconds between each transaction and the first transaction, and Amount is the transaction amount. Finally, there is the Class variable which equals 0 when the transaction is legitimate, and 1 when the transaction is fraudulent.  Now let's take a quick look at the data set using the skim() function.
+
+```{r Load data and examine using skim, echo=FALSE, message=FALSE, warning=FALSE}
+creditcard <- read_csv("C:/Users/dlz2/Downloads/creditcard.csv")
+skim(creditcard)
+```  
+
+We can see from above that there are no missing values, and we can also see that the range of the Time and Amount variables are much larger than the other predictor variables.  This makes sense because the other variables have been PCA transformed.  We may need to scale and center the Time and Amount before trying to fit any machine learning models.  Now let's take a look at the distribution of the data.
+
+### Distribution of the data 
+
+```{r changing class levels, echo=TRUE, message=FALSE, warning=FALSE }
+# Changing class level, and making Class a factor
+creditcard$Class[creditcard$Class==0]<- "Legitimate"
+creditcard$Class[creditcard$Class==1]<- "Fraud"
+creditcard$Class <- factor(creditcard$Class)
+```
+
+The data has been loaded into a dataframe called creditcard. The Class variable has been changed to a factor since this is a classification problem.  As mentioned previously, the feature variables V1 through V28 have undergone PCA transformation, so these variables are not linearly uncorrelated.  We can verify the predictor variable correlations by looking at a plot of the correlation matrix by using the corrplot function from the corrplot library.  We can see in the correlation plot below that none of the PCA transformed variables are correlated.
+
+
+```{r corrplot of predictor variables, fig.height=5, fig.width=6, message=FALSE , warning=FALSE}
+predictor_correlations <- cor(creditcard[-31])
+corrplot(predictor_correlations)
+```  
+
+
+We will now plot the distribution of the Time and Amount variables.  First, we will look at the density curve of the Time variable.  The Time variable represents the number of seconds a transaction occurred after the first transaction.  We will scale the Time variable from seconds to hours and plot the density.  
+
+
+```{r density plot of Time in hours, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE }
+
+# Density curve of Time variable scaled to hours
+ggplot(creditcard, aes(x=(Time/3600), fill=Class)) +
+    geom_density(alpha=.3) +
+    ggtitle("Density curve of Time variable scaled to hours")+
+    scale_x_continuous(name="Time scaled to hours", breaks=seq(0,48,3))
+```
+
+We can see there are 48 hours of transactions, which coincides with the transactions occurring over two days.  To determine the relative time of day that each transaction occurred, we will scale the Time variable to a 24-hour scale.  Below is the density plot of the Time variable scaled to 24 hours.
+
+```{r density plot of Time in 24 hours, echo=FALSE, fig.height=4, fig.width=6, message=FALSE, warning=FALSE }
+# Density curve of Time variable scaled to 24 hours
+ggplot(creditcard, aes(x=((Time/3600)%%24), fill=Class)) +
+    geom_density(alpha=.3) +
+    ggtitle("Density curve of Time variable scaled to 24 hours")+
+    scale_x_continuous(name="Time scaled to 24 hours", breaks=seq(0,24))
+```  
+
+We can see in the 24 hour Time density plot that between hours 1-7 that the density plot of fraudulent transactions is much higher than the density plot of legitimate transactions.  While some insights could be drawn from the Time variable, it seems to be more of a transaction ordering variable.    
+
+Next, we will look at a histogram plot of the Amount variable.  We can see that the large and imbalanced data set makes it difficult to identify new information from the histogram.
+
+```{r Histogram of Amount variable, echo=FALSE, fig.height=4, fig.width=6, message=FALSE,cache=TRUE}
+# Histogram of Amount variable
+ggplot(creditcard, aes(x=Amount)) + 
+    geom_histogram(aes(fill=Class))+
+    ggtitle("Histogram of Amount variable")+
+    facet_grid(~Class)
+```
+
+We can take a closer look at the Amount variable by filtering transaction amounts by fraud type.  Since the dataset is so large, we will create two new dataframes, one containing the Amount variable for fraudulent transactions, and one containing the Amount variable for legitimate transactions.  Then we will plot the density curve for each Amount variable.
+
+```{r Filtering Amount variable, message=FALSE, warning=FALSE }
+fraud_only<- (creditcard %>% filter(Class =="Fraud"))[,30]
+legit_only <- (creditcard %>% filter(Class =="Legitimate"))[, 30]
+
+ggplot(fraud_only, aes(x=Amount)) +
+  geom_density(color="darkred", fill="red")+
+  ggtitle("Density curve of Amount variable for fraudulent transactions")
+  
+ggplot(legit_only, aes(x=Amount)) +
+  geom_density(color="darkblue", fill="lightblue")+
+  ggtitle("Density curve of Amount variable for legitimate transactions")
+
+```
+
+The Amount variable is skewed highly to the right.  We will scale and center the Time and Amount variables before fitting machine learning models since the PCA transformed variables have already been centered and scaled.   
+
+```{r Scale/center the Amount and time variables, message=FALSE,warning=FALSE }
+
+# Scale and center the Amount and time variables
+creditcard$Amount <- scale(creditcard$Amount, center = TRUE, scale = TRUE)
+creditcard$Time <- scale(creditcard$Time, center = TRUE, scale = TRUE)
+```
+
+## Data Splitting
+
+We will split the data into a training set and testing set using stratified sampling of the Class variable, by using the createDataPartition() function in the caret package.  The function ensures that the highly imbalanced structure of the original data set is preserved in both the training and test sets.
+
+```{r Creating train and test set, echo=TRUE, message=FALSE, warning=FALSE }
+# Create the training and test sets
+set.seed(2020)
+index <- createDataPartition(creditcard$Class, p = .70,
+                             list = FALSE,
+                             times = 1)
+imbal_train <- creditcard[index,]
+test_data <- creditcard[-index,]
+```
+
+## Imbalanced data set 
+
+We can verify the imbalanced nature of the data set by using the table() and prop.table() functions from base R.  We can see below that the Class imbalance is 99.83% to 0.17% in the original set, the training set, and the testing set.
+
+```{r table and prop.table, echo=TRUE, message=FALSE, warning=FALSE}
+prop.table(table(creditcard$Class))*100
+prop.table(table(imbal_train$Class))*100
+prop.table(table(test_data$Class))*100
+```
+
+Imbalanced data sets can be difficult for classifier algorithms since they have a bias toward the majority class. The minority class is often ignored, and only the majority class is predicted, which in this case lead to an overall 99.83% accuracy rate, but a 0% rate of fraud detection.  As a result, there is a high probability of misclassification of the minority class as compared to the majority class.  One way of dealing with this challenge is by balancing classes in the training data before providing the data as input to a machine learning algorithm.  It is important to note that all sampling will be applied to the imbalanced_train set.  We should not resample the test set, as it needs to maintain the class imbalance that we would expect to see "in the wild."   
+
+We will next look at down-sampling, up-sampling, and hybrid sampling methods in the following sections, and use the caret package with these methods to sample inside of cross-validation.  
+
+### Resampling methods implemented in caret
+
+We first give an overview of the idea behind each sampling method.
+
+Down-sampling is used to randomly subset the majority class in the training set so that class frequency matches the minority class.  
+
+Up-sampling randomly resamples the minority class in the training set so the class frequency matches the majority class.
+
+Hybrid sampling methods like [SMOTE](https://www.rdocumentation.org/packages/DMwR/versions/0.4.1/topics/SMOTE) and
+[ROSE](https://www.rdocumentation.org/packages/ROSE/versions/0.0-3/topics/ROSE) down-sample the majority class and synthesize new data points in the minority class.  We will also use the [ovun.sample()](https://www.rdocumentation.org/packages/ROSE/versions/0.0-3/topics/ovun.sample) function to create an evenly balanced data set from the imbalanced train set.
+
+With the exception of the ovun.sample() method, caret offers built-in functionality to resample data using all of the above methods on the training data during the model building-process.  To use the ovun.sample() method, we will need to create a balanced set before using caret.
+
+## Resampling the training set
+
+We start by using the trainControl() and train() functions in the caret package to setup K-fold cross-validation and fit a Recursive Partitioning and Regression Trees (rpart) model to the imbal_train data without any re-sampling.  We will then in turn apply down-sampling, up-sampling, ROSE sampling, and SMOTE sampling to the imbal_train set and fit an rpart model for each.  The sampling method is specified inside of the trainControl() function by setting sampling = "up", "down", "rose", or "smote" accordingly.  The sampling method can also be specified by changing the control$sampling variable directly.  The ovun.sample() sampling method is not supported inside of trainControl and must be used outside of trainControl before fitting the model.
+
+```{r Imbalanced train set model, echo=TRUE, message=FALSE, warning=FALSE}
+
+Mycluster <- makeCluster(detectCores()-2)
+registerDoParallel(Mycluster)
+
+# Generate evenly balanced data set using ovun.sample()
+balanced_train <- ovun.sample(Class ~ ., data = imbal_train, method = "both", p=0.5, N=30000, seed = 2020)$data
+
+# No sampling is specified
+control <- trainControl(method="cv", number=10,
+                     summaryFunction=twoClassSummary, 
+                     savePredictions=TRUE, classProbs=TRUE, 
+                     allowParallel = TRUE)
+
+# Model fit to imbal_train with no sampling
+set.seed(2020)
+rpart_imbalanced <- train(Class~., data=imbal_train,
+                    method="rpart", metric="ROC", trControl=control)
+
+# Model fit to balanced_train by setting data=balanced_train
+set.seed(2020)
+rpart_balanced <- train(Class~., data=balanced_train,
+                    method="rpart", metric="ROC", trControl=control)
+
+# Sampling set to "down"
+control <- trainControl(method="cv", number=10,
+                     summaryFunction=twoClassSummary, 
+                     savePredictions=TRUE, classProbs=TRUE, 
+                     allowParallel = TRUE, sampling = "down")
+
+# Model fit to imbal_train with down-sampling
+set.seed(2020)
+rpart_down <- train(Class~., data=imbal_train,
+                    method="rpart", metric="ROC", trControl=control)
+
+# Sampling set to "up" by setting control$sampling = "up"
+control$sampling = "up"
+
+# Model fit to imbal_train with up-sampling
+set.seed(2020)
+rpart_up <- train(Class~., data=imbal_train,
+                    method="rpart", metric="ROC", trControl=control)
+
+# Sampling set to "rose" by setting control$sampling = "rose"
+control$sampling = "rose"
+
+# Model fit to imbal_train with ROSE sampling
+set.seed(2020)
+rpart_rose <- train(Class~., data=imbal_train,
+                    method="rpart", metric="ROC", trControl=control)
+
+# Sampling set to "smote" by setting control$sampling = "smote"
+control$sampling = "smote"
+
+# Model fit to imbal_train with SMOTE sampling
+set.seed(2020)
+rpart_smote <- train(Class~., data=imbal_train,
+                    method="rpart", metric="ROC", trControl=control)
+
+```  
+
+
+## Comparing resampling methods
+
+In the table below, we can see how poorly the original imbalanced train set compared to the other sampled sets.  
+
+```{r echo=TRUE, message=FALSE, warning=FALSE }
+models <- list(original = rpart_imbalanced, 
+                      balanced = rpart_balanced,
+                      down = rpart_down,
+                      up = rpart_up, 
+                      ROSE = rpart_rose,
+                      SMOTE = rpart_smote)
+                      
+resampling <- resamples(models)
+summary(resampling, metric = "ROC")
+
+```
+
+
+## Comparing model test set results
+
+To compare the results of each sampling method on the testing set we first define a function to aggregate the ROC results from the model testing.  Then we will create a dataframe with the test results.  The code below was adapted from the [caret website](https://topepo.github.io/caret/subsampling-for-class-imbalances.html).  
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+test_roc <- function(model, data) {
+  roc_obj <- roc(data$Class, 
+                 predict(model, data, type = "prob")[, "Legitimate"],
+                 levels = c("Fraud", "Legitimate"))
+  ci(roc_obj)
+  
+  }
+  
+inside_test <- lapply(models, test_roc, data = test_data)
+inside_test <- lapply(inside_test, as.vector)
+inside_test <- do.call("rbind", inside_test)
+colnames(inside_test) <- c("lower", "ROC", "upper")
+inside_test <- as.data.frame(inside_test)
+inside_test
+
+```  
+
+In the table above, we again see how poorly the model fit to the original imbalanced train set performed.  The model fit to every other sampling method performed significantly better (up to a nearly 9% ROC increase).  We can see from the test results that the balanced data set has the highest ROC.  We will therefore use the balanced_train data set when fitting subsequent models.  
+
+## Calculate variable importance
+
+The caret package provides tools to report on the importance of variables in your data when fit to a given model.  We will calculate the variable importance for the rpart_balance model that was previously fit.  We can also graph the results using the plot() function.  From the table below, we can see that V14, V10, V12, V4, V17, V3, V7, V8, and V11 are the most important variables in the model.  Keep in mind that variable importance is dependent on the model, so it might change if a different model is examined.  In other words, we should not discard any variables based on the variable importance of a single model.  Variable importance can be used to eliminate redundant features that are highly correlated.  For example, if there were multiple highly correlated (correlation >0.75) variables that also had high importance in a model, we could potentially discard one or more of them from the model.  In this case, since the variables V1, V2,..., V28 are PCA transformed, they are uncorrelated by design, and none should not be discarded.
+
+```{r Calculating variable importance, echo=TRUE, message=FALSE, warning=FALSE}
+importance <- varImp(rpart_balanced)
+plot(importance, main="Variable importance")
+importance
+```
+
+
+## Fitting Multiple Models
+
+The caretEnsemble package allows for multiple models to be fit inside of the trainControl() function.  To do this, we need only specify the model by tag.  The tag for each of the 238 available machine learning models can be found on the official caret website [here](https://topepo.github.io/caret/train-models-by-tag.html).  We will fit five machine models in the code below: gradient boosting (gbm), linear discriminant analysis (lda), support vector machine with a radial kernel basis (svmradial), naive Bayes (nb), and recursive partitioning and regression trees (rpart).
+
+```{r Fitting Multiple Models simultaneously, echo=TRUE, message=FALSE, warning=FALSE }
+
+control_multiple <- trainControl(method="cv", number=10,
+                     summaryFunction=twoClassSummary, 
+                     savePredictions=TRUE, classProbs=TRUE, 
+                     allowParallel = TRUE)
+algorithmList <- c('gbm','lda','svmRadial','rpart','nb')
+set.seed(2020)
+
+model_list <- caretList(Class~., data=balanced_train,
+                    trControl=control_multiple, methodList=algorithmList)
+results <- resamples(model_list)
+summary(results)
+dotplot(results)
+
+```
+
+## Comparing multiple models test results
+
+```{r echo=FALSE, message=FALSE, warning=FALSE, paged.print=FALSE}
+test_roc <- function(model, data) {
+  library(pROC)
+  roc_obj <- roc(data$Class, 
+                 predict(model, data, type = "prob")[, "Legitimate"],
+                 levels = c("Fraud", "Legitimate"))
+  ci(roc_obj)
+  
+  }
+
+
+multiple_test <- lapply(model_list, test_roc, data = test_data)
+multiple_test <- lapply(multiple_test, as.vector)
+multiple_test <- do.call("rbind", multiple_test)
+colnames(multiple_test) <- c("lower", "ROC", "upper")
+multiple_test <- as.data.frame(multiple_test)
+multiple_test
+
+```  
+
+While the ROC dropped slightly between training and testing, the gradient boosting model had the highest ROC for both. 
+
+
+## Building an Ensemble model 
+
+We can combine the predictions of multiple caret models using the caretStack() function in the caretEnsemble package.  First, we want to check that the models are not highly correlated (correlation > 0.75). We want the correlations low because we want the models to be good at predicting in different ways.  To check model correlations, we use the modelCor() function.
+
+```{r echo=TRUE, message=FALSE, warning=FALSE}
+modelCor(results)
+```  
+
+We can see that the lda and nb models slightly exceed the 0.75 correlation threshold, but all of the other correlations are much lower.  While we could remove either the lda or nb models, we will leave them both in the ensemble since the correlation was only slightly exceeded.
+
+```{r Model Stacking}
+# Model stacking with glm
+stackControl <- trainControl(method="cv", number=10,
+                     summaryFunction=twoClassSummary, 
+                     savePredictions=TRUE, classProbs=TRUE, 
+                     allowParallel = TRUE)
+set.seed(2020)
+stack.glm <- caretStack(model_list, method="glm", metric="ROC", trControl=stackControl)
+print(stack.glm)
+
+```  
+
+Comparing the results above to the training results, we see that the stacked model has a 0.99947 ROC, which is slightly higher than the 0.99929 ROC from the gbm model alone.
+
+
+## Conclusions
+
+After utilizing multiple sampling methods, it was determined that the ovun.sample method produced the best ROC results when applied to the imbalanced training set.   The resampled set contains a 50/50 balance and 30,000 rows.  Additionally, we found that the gradient boosting model performed better than the other four tested models. The variable importance was determined, which gave insights into the most important predictor variables.  Finally, an ensemble model was created and had a slightly higher ROC than the gradient boosting model alone.  The five machine learning models tested are a small fraction of the 238 models available in the caret package, so while our results are promising, there are most certainly other models or ensembles that could produce better results.
+
+Additionally, we did not explore model tuning, which caret can do in a general way by using the tunelength parameter, or in fully customizable ways by specifying parameters inside of the train() function.  The results of this project have shown how machine learning can be used to detect fraud.  It is no surprise that some of the largest businesses and banks in the world utilize machine learning for fraud detection. 
+
+
+## Reference
+
+[Official caret package website](https://topepo.github.io/caret/)
+
